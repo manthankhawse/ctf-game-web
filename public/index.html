@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Capture the Flag</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <h1>Capture the Flag</h1>
+    <div class="game-container">
+        <div class="score-board">
+            <h2>SCORES</h2>
+            <p>Blue: <span id="blue-score">0</span></p>
+            <p>Red: <span id="red-score">0</span></p>
+        </div>
+        <canvas id="gameCanvas" width="600" height="600"></canvas>
+        <div class="status">
+            <h2>STATUS</h2>
+            <p id="player-id">Connecting...</p>
+            <p id="game-status">Waiting for another player...</p>
+        </div>
+    </div>
+    <footer>
+        <p>Use WASD or Arrow Keys to move.</p>
+    </footer>
+    <script src="client.js"></script>
+</body>
+</html>
