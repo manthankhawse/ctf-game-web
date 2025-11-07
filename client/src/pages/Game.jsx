@@ -18,6 +18,10 @@ function Game() {
   const [myTeam, setMyTeam] = useState(null);
   const [gameState, setGameState] = useState(null); 
   const [gameStatus, setGameStatus] = useState('Connecting...');
+  const [mapLayout, setMapLayout] = useState(null);
+
+  const localStreamRef = useRef(null);
+  const [remoteStreams, setRemoteStreams] = useState({});
 
   const peerConnectionRef = useRef(null); 
   const dataChannelRef = useRef(null); 
@@ -25,6 +29,36 @@ function Game() {
   const inputLoopRef = useRef(null);
   const localMovementsRef = useRef({ up: false, down: false, left: false, right: false });
   const isNavigatingAwayRef = useRef(false);
+
+  // --- useEffect for Microphone ---
+  useEffect(() => {
+    navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+      .then(stream => {
+        console.log('Got microphone stream');
+        localStreamRef.current = stream;
+        
+        // --- FIX PART 1: ---
+        // If the PeerConnection was created *before* we got the mic,
+        // add the track to it now.
+        if (peerConnectionRef.current) {
+          console.log('PC exists, adding mic track retroactively.');
+          stream.getTracks().forEach(track => {
+            peerConnectionRef.current.addTrack(track, stream);
+          });
+        }
+        // --- END OF FIX ---
+      })
+      .catch(err => {
+        console.error('Failed to get mic', err);
+        alert('You must allow microphone access to use voice chat.');
+      });
+
+    return () => {
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, []); // Runs once on mount
 
   // --- useEffect 1: Setup Game Listeners (Runs ONCE) ---
   useEffect(() => {
@@ -40,9 +74,35 @@ function Game() {
           console.log('Received server offer');
           setMyId(message.playerInfo.id);
           setMyTeam(message.playerInfo.team);
+          setMapLayout(message.mapLayout);
           setGameStatus('Connecting to game server...');
 
           peerConnectionRef.current = new RTCPeerConnection(iceServers);
+
+          // --- FIX PART 2: ---
+          // If the mic was ready *before* the PeerConnection was created,
+          // add the track to it now.
+          if (localStreamRef.current) {
+            console.log('Mic was ready, adding track to new PC.');
+            localStreamRef.current.getTracks().forEach(track => {
+              peerConnectionRef.current.addTrack(track, localStreamRef.current);
+            });
+          }
+          // --- END OF FIX ---
+
+          // --- Handle incoming remote tracks ---
+          peerConnectionRef.current.ontrack = (event) => {
+            console.log('Got remote audio track:', event.streams[0].id);
+            const stream = event.streams[0];
+            const streamId = stream.id;
+            setRemoteStreams(prevStreams => {
+              if (prevStreams[streamId]) return prevStreams;
+              return {
+                ...prevStreams,
+                [streamId]: stream
+              };
+            });
+          };
 
           peerConnectionRef.current.onicecandidate = (event) => {
               if (event.candidate) {
@@ -61,7 +121,6 @@ function Game() {
 
           await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(message.offer));
 
-          console.log(`Processing ${iceQueueRef.current.length} queued ICE candidates.`);
           while (iceQueueRef.current.length > 0) {
               const candidate = iceQueueRef.current.shift();
               try {
@@ -110,17 +169,19 @@ function Game() {
       if (peerConnectionRef.current) {
           peerConnectionRef.current.close();
       }
+      Object.values(remoteStreams).forEach(stream => {
+        stream.getTracks().forEach(track => track.stop());
+      });
+      setRemoteStreams({});
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [socket, lobby, navigate, addSocketListener, removeSocketListener]); 
 
 
-  // --- Helper: Setup Data Channel ---
   const setupDataChannel = (channel) => {
     channel.onopen = () => {
         console.log('Data channel OPEN');
         setGameStatus('Game in progress!');
-        
         clearInterval(inputLoopRef.current);
         inputLoopRef.current = setInterval(() => {
             if (channel.readyState === 'open') {
@@ -131,41 +192,31 @@ function Game() {
             }
         }, 1000 / 60); 
     };
-
     channel.onclose = () => {
         console.log('Data channel CLOSED');
         setGameStatus('Lost connection to game server.');
         clearInterval(inputLoopRef.current); 
     };
-
     channel.onmessage = (event) => {
         const message = JSON.parse(event.data);
-
         if (message.type === 'gameState') {
             setGameState(message.state); 
         } else if (message.type === 'game_over_final') {
             console.log("Final game over received!", message);
-            
             clearInterval(inputLoopRef.current); 
-            
             isNavigatingAwayRef.current = true;
-            
-            // --- THIS IS THE CHANGE FROM PHASE 3 ---
-            // Pass the entire message state to the results page
             navigate('/results', { 
                 state: { 
                     winner: message.winner, 
                     scores: message.scores,
-                    playerStats: message.playerStats, // <-- NEW
-                    mvp: message.mvp                   // <-- NEW
+                    playerStats: message.playerStats,
+                    mvp: message.mvp
                 } 
             });
-            // --- END OF CHANGE ---
         }
     };
   };
 
-  // --- useEffect 2: Keyboard Input Handling ---
   useEffect(() => {
     const getDirectionFromKey = (key) => {
       switch (key) {
@@ -176,7 +227,6 @@ function Game() {
         default: return null;
       }
     };
-
     const handleKeyDown = (e) => {
       const direction = getDirectionFromKey(e.key);
       if (direction) { 
@@ -184,7 +234,6 @@ function Game() {
         localMovementsRef.current[direction] = true;
       }
     };
-
     const handleKeyUp = (e) => {
       const direction = getDirectionFromKey(e.key);
       if (direction) { 
@@ -192,26 +241,39 @@ function Game() {
         localMovementsRef.current[direction] = false;
       }
     };
-    
     const handleBlur = () => {
       console.log("Window blurred, releasing all keys.");
       localMovementsRef.current = { up: false, down: false, left: false, right: false };
     };
-
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
     window.addEventListener('blur', handleBlur); 
-
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
       window.removeEventListener('blur', handleBlur); 
     };
-  }, []); // Empty deps, runs once
+  }, []);
 
   // --- Render Logic ---
   const scores = gameState ? gameState.scores : { blue: 0, red: 0 };
   const teamColor = myTeam === 'blue' ? '#3498db' : '#e74c3c';
+
+  // --- Auto-playing <audio> element ---
+  const RemoteAudio = ({ stream }) => {
+    const audioRef = useRef(null);
+    useEffect(() => {
+      if (audioRef.current) {
+        audioRef.current.srcObject = stream;
+        
+        audioRef.current.play().catch(error => {
+          console.warn("Remote audio play() was blocked by browser.", error);
+        });
+      }
+    }, [stream]);
+    return <audio ref={audioRef} autoPlay playsInline />;
+  };
+  // ---
 
   return (
     <div className="game-container">
@@ -221,7 +283,12 @@ function Game() {
         <p>Red: <span id="red-score">{scores.red}</span></p>
       </div>
       
-      <GameCanvas gameState={gameState} myTeam={myTeam} myId={myId} />
+      <GameCanvas 
+        gameState={gameState} 
+        mapLayout={mapLayout} 
+        myTeam={myTeam} 
+        myId={myId} 
+      />
       
       <div className="status">
         <h2>STATUS</h2>
@@ -229,6 +296,12 @@ function Game() {
           {myId ? `You are: ${myId.toUpperCase()}` : 'Connecting...'}
         </p>
         <p id="game-status">{gameStatus}</p>
+      </div>
+
+      <div className="remote-audio-container">
+        {Object.keys(remoteStreams).map(streamId => (
+          <RemoteAudio key={streamId} stream={remoteStreams[streamId]} />
+        ))}
       </div>
     </div>
   );
