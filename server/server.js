@@ -1,29 +1,18 @@
 // server.js
-// Authoritative Server with Lobby System
-// Uses WebSockets for signaling/lobby and WebRTC (UDP) for game data.
-
+// Main Thread: Handles Lobbies, WebSockets, and WebRTC
 const http = require('http');
 const WebSocket = require('ws');
 const { v4: uuidv4 } = require('uuid');
 const { RTCPeerConnection, RTCSessionDescription, RTCIceCandidate } = require('werift');
+const { Worker } = require('worker_threads');
+const path = require('path');
 
 // --- Game Constants ---
-const GRID_SIZE = 20;
-const WIN_SCORE = 3;
-const TICK_RATE = 1000 / 20; // 20 ticks per second
 const modeRequirements = {
     '1v1': 2,
     '2v2': 4,
     '3v3': 6
 };
-
-// --- Server State ---
-const wsServer = new WebSocket.Server({ port: 3000 });
-console.log('WebSocket Server running on port 3000');
-
-let clients = {};     // { 'clientId': { ws, clientId, name, lobbyId, roomId } }
-let lobbies = {};     // { 'lobbyId': { lobbyId, hostId, mode, isPrivate, maxPlayers, players: { 'clientId': { name, team } } } }
-let gameRooms = {}; // { 'roomId': new GameRoom(...) }
 
 // --- Map Layout ---
 const simpleMapLayout = [
@@ -49,6 +38,15 @@ const simpleMapLayout = [
     [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
 ];
 
+// --- Server State ---
+const wsServer = new WebSocket.Server({ port: 3000 });
+console.log('WebSocket Server running on port 3000');
+console.log(`Server PID is: ${process.pid}`);
+
+let clients = {};
+let lobbies = {};
+let gameHosts = {};
+
 // --- Helper Functions ---
 function generateLobbyCode() {
     let code = '';
@@ -58,9 +56,7 @@ function generateLobbyCode() {
         for (let i = 0; i < 6; i++) {
             code += chars.charAt(Math.floor(Math.random() * chars.length));
         }
-        if (!lobbies[code]) {
-            break;
-        }
+        if (!lobbies[code]) break;
     }
     return code;
 }
@@ -89,118 +85,133 @@ function broadcastLobbyUpdate(lobbyId) {
     });
 }
 
-// --- GameRoom Class ---
-class GameRoom {
+// --- GameHost Class (Unchanged) ---
+class GameHost {
     constructor(roomId, mode, playerClients, lobbyPlayers) {
         this.roomId = roomId;
         this.mode = mode;
-        this.gameLoopInterval = null;
-        this.playerMovements = {};
-        this.players = {}; // { 'clientId': { pc, dc, info, audioTrack? } }
+        this.players = {};
         this.playerIdToInfo = {};
-        this.mapLayout = simpleMapLayout;
+        this.worker = null;
+        this.openDataChannels = 0;
+        this.totalPlayers = playerClients.length;
+        this.gameStarted = false;
 
-        this.gameState = {
-            players: {},
-            flags: {
-                blue: { x: 1, y: 9, carriedBy: null },
-                red: { x: 18, y: 9, carriedBy: null }
-            },
-            scores: { blue: 0, red: 0 },
-            playerStats: {}
-        };
+        console.log(`[Host ${roomId}]: Creating ${mode} game...`);
         
-        console.log(`[Room ${roomId}]: Creating ${mode} game...`);
-
         const teamCounts = { blue: 0, red: 0 };
-        playerClients.forEach((client) => {
+        for (const client of playerClients) {
             const lobbyInfo = lobbyPlayers[client.clientId];
-            if (!lobbyInfo) return;
             const team = lobbyInfo.team;
             teamCounts[team]++;
             const playerId = `${team}${teamCounts[team]}`;
-            const playerInfo = { 
+            this.playerIdToInfo[playerId] = { 
                 id: playerId,
                 team: team,
                 name: lobbyInfo.name
             };
-            this.playerIdToInfo[playerId] = playerInfo;
-            // Pass 'this.players' so setupPlayer can access other players
-            this.setupPlayer(client, playerInfo, this.players); 
-        });
-    }
+            this.players[client.clientId] = { info: { ...this.playerIdToInfo[playerId], clientId: client.clientId } };
+        }
 
-    async setupPlayer(client, playerInfo, allPlayers) { // <-- Pass in allPlayers
+        this.worker = new Worker(path.resolve('./game.worker.js'));
+        
+        this.worker.postMessage({
+            type: 'init',
+            roomId: this.roomId,
+            playerInfoMap: this.playerIdToInfo
+        });
+
+        this.worker.on('message', this.handleWorkerMessage.bind(this));
+        this.worker.on('error', (err) => console.error(`[Worker ${this.roomId}] Error:`, err));
+        this.worker.on('exit', (code) => {
+            if (code !== 0) console.error(`[Worker ${this.roomId}] Stopped with exit code ${code}`);
+            else console.log(`[Worker ${this.roomId}] Exited cleanly.`);
+        });
+
+        for (const client of playerClients) {
+            this.setupPlayerWebRTC(client);
+        }
+    }
+    handleWorkerMessage(message) {
+        switch (message.type) {
+            case 'game_state':
+                const stateMessage = JSON.stringify({ type: 'gameState', state: message.payload });
+                this.broadcastToDataChannels(stateMessage);
+                break;
+            case 'game_over':
+                const finalResultsMessage = JSON.stringify({ 
+                    type: 'game_over_final', 
+                    ...message.payload 
+                });
+                this.broadcastToDataChannels(finalResultsMessage);
+                break;
+            case 'worker_shutdown':
+                console.log(`[Host ${this.roomId}]: Worker signaled shutdown. Cleaning up.`);
+                this.cleanup();
+                break;
+        }
+    }
+    broadcastToDataChannels(messageString) {
+        for (const clientId in this.players) {
+            const player = this.players[clientId];
+            if (player.dc && player.dc.readyState === 'open') {
+                player.dc.send(messageString);
+            }
+        }
+    }
+    async setupPlayerWebRTC(client) {
+        const clientId = client.clientId;
+        const playerInfo = this.players[clientId].info;
         const pc = new RTCPeerConnection({
             iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
         });
-        
         const dc = pc.createDataChannel('gameData', {
             ordered: false,
             maxRetransmits: 0
         });
-
-        // Store the player
-        this.players[client.clientId] = { pc, dc, info: playerInfo };
-        this.playerMovements[playerInfo.id] = { up: false, down: false, left: false, right: false };
-
-        // --- NEW: Voice Chat Relay Logic ---
+        this.players[clientId].pc = pc;
+        this.players[clientId].dc = dc;
         pc.ontrack = (event) => {
             const track = event.track;
-            const stream = event.streams[0];
             if (track.kind !== 'audio') return;
-
-            console.log(`[Room ${this.roomId}]: Received audio track from ${playerInfo.id}`);
-            
-            // Store this player's audio track
-            this.players[client.clientId].audioTrack = track;
-
-            // --- Relay this track to all CURRENT teammates ---
-            for (const otherClientId in allPlayers) {
-                if (otherClientId === client.clientId) continue; // Don't send back to self
-
-                const teammate = allPlayers[otherClientId];
+            this.players[clientId].audioTrack = track;
+            for (const otherClientId in this.players) {
+                if (otherClientId === clientId) continue;
+                const teammate = this.players[otherClientId];
                 if (teammate.info.team === playerInfo.team) {
-                    console.log(`[Room ${this.roomId}]: Relaying ${playerInfo.id}'s audio to ${teammate.info.id}`);
-                    // Add this track to the PC of the teammate
-                    teammate.pc.addTrack(track, stream);
+                    teammate.pc.addTrack(track, event.streams[0]);
                 }
             }
         };
-
-        // --- Also, add all EXISTING teammates' tracks to this new player ---
-        for (const otherClientId in allPlayers) {
-            if (otherClientId === client.clientId) continue;
-
-            const teammate = allPlayers[otherClientId];
-            // If teammate is on the same team AND they already sent us their track
+        for (const otherClientId in this.players) {
+            if (otherClientId === clientId) continue;
+            const teammate = this.players[otherClientId];
             if (teammate.info.team === playerInfo.team && teammate.audioTrack) {
-                console.log(`[Room ${this.roomId}]: Sending existing ${teammate.info.id}'s audio to new player ${playerInfo.id}`);
-                pc.addTrack(teammate.audioTrack, teammate.audioTrack.stream); // stream might be tricky, but track is key
+                pc.addTrack(teammate.audioTrack);
             }
         }
-        // --- END OF NEW VOICE LOGIC ---
-
         dc.onopen = () => {
-            console.log(`[Room ${this.roomId}]: Data channel OPEN for ${playerInfo.id}`);
-            this.addPlayerToState(playerInfo);
-            if (Object.keys(this.players).length === Object.keys(this.gameState.players).length) {
-                console.log(`[Room ${this.roomId}]: All players connected. Starting game loop.`);
-                this.startGameLoop();
+            console.log(`[Host ${this.roomId}]: Data channel OPEN for ${playerInfo.id}`);
+            this.openDataChannels++;
+            if (!this.gameStarted && this.openDataChannels === this.totalPlayers) {
+                this.gameStarted = true;
+                console.log(`[Host ${this.roomId}]: All ${this.totalPlayers} data channels are open. Starting game.`);
+                this.worker.postMessage({ type: 'start_game' });
             }
         };
-        
         dc.onmessage = (event) => {
             const message = JSON.parse(event.data);
-            if (message.type === 'client_input' && message.inputState) {
-                if (this.playerMovements[playerInfo.id]) {
-                    this.playerMovements[playerInfo.id] = message.inputState;
-                }
+            if (message.type === 'client_input') {
+                this.worker.postMessage({
+                    type: 'client_input',
+                    playerId: playerInfo.id,
+                    inputState: message.inputState
+                });
             }
         };
         dc.onclose = () => {
-            console.log(`[Room ${this.roomId}]: Data channel CLOSED for ${playerInfo.id}`);
-            this.removePlayer(client.clientId, playerInfo.id);
+            console.log(`[Host ${this.roomId}]: Data channel CLOSED for ${playerInfo.id}`);
+            this.removePlayer(clientId, playerInfo.id);
         };
         pc.onicecandidate = (event) => {
             if (event.candidate) {
@@ -210,242 +221,127 @@ class GameRoom {
                 }));
             }
         };
-
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
-
         client.ws.send(JSON.stringify({
             type: 'server_offer',
             offer: offer, 
             playerInfo: playerInfo,
             allPlayers: Object.values(this.playerIdToInfo),
-            mapLayout: this.mapLayout
+            mapLayout: simpleMapLayout
         }));
     }
-
     async handleAnswer(clientId, answer) {
         const pc = this.players[clientId]?.pc;
         if (pc) {
             await pc.setRemoteDescription(answer); 
-            console.log(`[Room ${this.roomId}]: Set remote (answer) for ${this.players[clientId].info.id}`);
         }
     }
-
     async handleIceCandidate(clientId, candidate) {
         const pc = this.players[clientId]?.pc;
         if (pc && candidate) {
             await pc.addIceCandidate(new RTCIceCandidate(candidate));
         }
     }
-
-    addPlayerToState(playerInfo) {
-        const isBlue = playerInfo.team === 'blue';
-        const teamPlayers = Object.values(this.gameState.players).filter(p => p.team === playerInfo.team).length;
-        const yPos = 9 + (teamPlayers % 2 === 0 ? -teamPlayers : teamPlayers);
-        this.gameState.players[playerInfo.id] = {
-            x: isBlue ? 1 : 18,
-            y: yPos,
-            initialY: yPos,
-            team: playerInfo.team,
-            name: playerInfo.name,
-            hasFlag: null
-        };
-        this.gameState.playerStats[playerInfo.id] = {
-            name: playerInfo.name,
-            team: playerInfo.team,
-            captures: 0,
-            tags: 0
-        };
-    }
-
-    startGameLoop() {
-        if (this.gameLoopInterval) {
-            console.warn(`[Room ${this.roomId}]: startGameLoop called, but loop is already running.`);
-            return;
-        }
-        console.log(`[Room ${this.roomId}]: Game loop started.`);
-        this.gameLoopInterval = setInterval(() => {
-            this.runGameTick();
-        }, TICK_RATE);
-    }
-
-    runGameTick() {
-        for (const playerId in this.playerMovements) {
-            const moves = this.playerMovements[playerId];
-            const player = this.gameState.players[playerId];
-            if (!player) continue;
-            let targetX = player.x, targetY = player.y;
-            if (moves.up) targetY--;
-            if (moves.down) targetY++;
-            if (moves.left) targetX--;
-            if (moves.right) targetX++;
-            targetX = Math.max(0, Math.min(GRID_SIZE - 1, targetX));
-            targetY = Math.max(0, Math.min(GRID_SIZE - 1, targetY));
-            const isWall = this.mapLayout[targetY][targetX] === 1;
-            let playerCollision = false;
-            for (const otherPlayerId in this.gameState.players) {
-                if (playerId === otherPlayerId) continue;
-                const otherPlayer = this.gameState.players[otherPlayerId];
-                if (targetX === otherPlayer.x && targetY === otherPlayer.y) {
-                    playerCollision = true;
-                    break;
-                }
-            }
-            if (!playerCollision && !isWall) {
-                player.x = targetX;
-                player.y = targetY;
-            }
-        }
-        let globalWinner = null;
-        for (const playerId in this.gameState.players) {
-            if (globalWinner) break;
-            const { newState, gameOverWinner } = this.checkGameLogic(playerId, this.gameState);
-            this.gameState = newState;
-            if (gameOverWinner) globalWinner = gameOverWinner;
-        }
-        const stateMessage = JSON.stringify({ type: 'gameState', state: this.gameState });
-        for (const clientId in this.players) {
-            const { dc } = this.players[clientId];
-            if (dc.readyState === 'open') {
-                dc.send(stateMessage);
-            }
-        }
-        if (globalWinner) {
-            console.log(`[Room ${this.roomId}]: FINAL Game Over! Winner: ${globalWinner}`);
-            clearInterval(this.gameLoopInterval);
-            let mvpPlayerId = null;
-            let maxMvpScore = -1;
-            for (const [playerId, stats] of Object.entries(this.gameState.playerStats)) {
-                const mvpScore = (stats.captures * 100) + (stats.tags * 25);
-                if (mvpScore > maxMvpScore) {
-                    maxMvpScore = mvpScore;
-                    mvpPlayerId = playerId;
-                }
-            }
-          const finalResultsMessage = JSON.stringify({ 
-                type: 'game_over_final', 
-                winner: globalWinner,
-                scores: this.gameState.scores,
-                playerStats: this.gameState.playerStats,
-                mvp: mvpPlayerId
-            });
-            for (const clientId in this.players) {
-                const { dc } = this.players[clientId];
-                 if (dc.readyState === 'open') {
-                    dc.send(finalResultsMessage);
-                }
-            }
-        }
-    }
-
-    checkGameLogic(playerId, currentState) {
-        let newState = JSON.parse(JSON.stringify(currentState));
-        let gameOverWinner = null;
-        const player = newState.players[playerId];
-        if (!player) return { newState, gameOverWinner };
-        const playerTeam = player.team;
-        const opponentTeam = playerTeam === 'blue' ? 'red' : 'blue';
-        const opponentFlag = newState.flags[opponentTeam];
-        const homeBaseCenter = playerTeam === 'blue' ? { x: 1, y: 9 } : { x: 18, y: 9 };
-        if (player.x === opponentFlag.x && player.y === opponentFlag.y && !player.hasFlag) {
-            player.hasFlag = opponentTeam;
-            opponentFlag.carriedBy = playerId;
-        }
-        const inHomeBase = (player.x === homeBaseCenter.x && player.y === homeBaseCenter.y);
-        if (player.hasFlag && inHomeBase) {
-            newState.scores[playerTeam]++;
-            if (newState.playerStats[playerId]) {
-                newState.playerStats[playerId].captures++;
-            }
-            if (newState.scores[playerTeam] >= WIN_SCORE) {
-                gameOverWinner = playerTeam; 
-            } else {
-                newState = this.resetRound(newState); 
-            }
-        }
-        for (const oppId in newState.players) {
-            const opponent = newState.players[oppId];
-            if (opponent.team === opponentTeam && opponent.hasFlag === playerTeam) {
-                if (player.x === opponent.x && player.y === opponent.y) {
-                    const returnedFlag = newState.flags[playerTeam];
-                    returnedFlag.x = homeBaseCenter.x; 
-                    returnedFlag.y = homeBaseCenter.y;
-                    returnedFlag.carriedBy = null;
-                    opponent.hasFlag = null;
-                    if (newState.playerStats[playerId]) {
-                        newState.playerStats[playerId].tags++;
-                    }
-                }
-            }
-        }
-        return { newState, gameOverWinner };
-    }
-
-    resetRound(state = this.gameState) {
-        for (const playerId in state.players) {
-            const player = state.players[playerId];
-            const isBlue = player.team === 'blue';
-            player.x = isBlue ? 1 : 18;
-            player.y = player.initialY;
-            player.hasFlag = null;
-     }
-        state.flags.blue = { x: 1, y: 9, carriedBy: null };
-        state.flags.red = { x: 18, y: 9, carriedBy: null };
-        return state;
-    }
-
     removePlayer(clientId, playerId) {
-        console.log(`[Room ${this.roomId}]: Removing player ${playerId}`);
-        
+        console.log(`[Host ${this.roomId}]: Removing player ${playerId}`);
         const player = this.players[clientId];
-        if (player && player.audioTrack) {
-            // Stop relaying this player's track to others
-            for (const otherClientId in this.players) {
-                if (otherClientId === clientId) continue;
-                const teammate = this.players[otherClientId];
-                if (teammate.info.team === player.info.team) {
-                    try {
-                        const senders = teammate.pc.getSenders().filter(s => s.track === player.audioTrack);
-                        senders.forEach(s => teammate.pc.removeTrack(s));
-                    } catch (e) {
-                        console.error('Error removing track from teammate:', e);
+        let wasOpen = false;
+        if (player && player.dc) {
+            wasOpen = player.dc.readyState === 'open';
+        }
+        this.worker.postMessage({
+            type: 'remove_player',
+            roomId: this.roomId,
+            playerId: playerId
+        });
+        if (player) {
+            player.pc?.close();
+            if (player.audioTrack) {
+                for (const otherClientId in this.players) {
+                    if (otherClientId === clientId) continue;
+                    const teammate = this.players[otherClientId];
+                    if (teammate.info.team === player.info.team) {
+                        try {
+                            const senders = teammate.pc.getSenders().filter(s => s.track === player.audioTrack);
+                            senders.forEach(s => teammate.pc.removeTrack(s));
+                        } catch (e) {}
                     }
                 }
             }
         }
-
         delete this.players[clientId];
-        delete this.gameState.players[playerId];
-        delete this.playerMovements[playerId];
-        delete this.playerIdToInfo[playerId];
-        
-        if (Object.keys(this.players).length === 0) {
-            console.log(`[Room ${this.roomId}]: Room is empty, cleaning up.`);
-            clearInterval(this.gameLoopInterval);
-            delete gameRooms[this.roomId];
+        if (!this.gameStarted) {
+            this.totalPlayers--;
+            if (wasOpen) {
+                this.openDataChannels--;
+            }
+            if (this.totalPlayers > 0 && this.openDataChannels === this.totalPlayers) {
+                this.gameStarted = true;
+                 console.log(`[Host ${this.roomId}]: Player left, but remaining ${this.totalPlayers} are ready. Starting game.`);
+                 this.worker.postMessage({ type: 'start_game' });
+            }
         }
+        if (this.totalPlayers === 0) {
+            console.log(`[Host ${this.roomId}]: Room is empty, terminating worker.`);
+            this.worker.terminate();
+            delete gameHosts[this.roomId];
+        }
+    }
+    cleanup() {
+        for (const clientId in this.players) {
+            this.players[clientId].pc?.close();
+            clients[clientId].roomId = null;
+        }
+        delete gameHosts[this.roomId];
     }
 }
 
 // --- WebSocket Signaling & Lobby Logic ---
 wsServer.on('connection', (ws) => {
     const clientId = uuidv4();
-    clients[clientId] = { 
-        ws, 
-        clientId, 
-        name: null, 
-        lobbyId: null, 
-        roomId: null 
-    };
+    clients[clientId] = { ws, clientId, name: null, lobbyId: null, roomId: null };
     console.log(`Client ${clientId} connected.`);
     ws.send(JSON.stringify({ type: 'server_client_id', clientId }));
+
+    // --- NEW: Extracted startGame function ---
+    // This function can be called by anyone with access to the lobby
+    function startGame(lobby) {
+        const roomId = lobby.lobbyId;
+        console.log(`Lobby ${roomId} is starting game...`);
+        
+        const playerClientIds = Object.keys(lobby.players);
+        // Filter out any clients that might have disconnected in a weird state
+        const playersForGame = playerClientIds.map(cid => clients[cid]).filter(c => c); 
+        const lobbyPlayers = lobby.players;
+
+        // 1. Tell all players game is starting
+        broadcastToLobby(roomId, { type: 'server_game_starting', lobby: lobby });
+        
+        // 2. Create new GameHost (spawns worker)
+        gameHosts[roomId] = new GameHost(roomId, lobby.mode, playersForGame, lobbyPlayers);
+        
+        // 3. Update client states
+        for (const c of playersForGame) {
+            c.lobbyId = null;
+            c.roomId = roomId;
+        }
+        
+        // 4. Delete the lobby
+        delete lobbies[roomId];
+    }
+    // --- END OF NEW FUNCTION ---
+
     ws.on('message', (message) => {
         const data = JSON.parse(message);
         const client = clients[clientId];
         if (!client) return;
+
         const lobby = client.lobbyId ? lobbies[client.lobbyId] : null;
-        const room = client.roomId ? gameRooms[client.roomId] : null;
+        const host = client.roomId ? gameHosts[client.roomId] : null;
+
         switch (data.type) {
+            // --- Lobby cases (Unchanged) ---
             case 'client_set_name':
                 const name = data.name.substring(0, 15);
                 client.name = name;
@@ -453,7 +349,7 @@ wsServer.on('connection', (ws) => {
                 ws.send(JSON.stringify({ type: 'server_name_set', name: name }));
                 break;
             case 'client_create_lobby':
-                if (lobby || room) {
+                if (lobby || host) {
                     ws.send(JSON.stringify({ type: 'error', message: 'Already in a lobby or game.' }));
                     return;
                 }
@@ -469,12 +365,7 @@ wsServer.on('connection', (ws) => {
                     mode: mode,
                     isPrivate: data.isPrivate,
                     maxPlayers: modeRequirements[mode],
-                    players: {
-                        [clientId]: {
-                            name: client.name,
-                            team: 'blue'
-                        }
-                    }
+                    players: { [clientId]: { name: client.name, team: 'blue' } }
                 };
                 lobbies[lobbyId] = newLobby;
                 client.lobbyId = lobbyId;
@@ -482,7 +373,7 @@ wsServer.on('connection', (ws) => {
                 ws.send(JSON.stringify({ type: 'server_lobby_created', lobbyState: newLobby }));
                 break;
             case 'client_join_lobby':
-                if (lobby || room) {
+                 if (lobby || host) {
                     ws.send(JSON.stringify({ type: 'error', message: 'Already in a lobby or game.' }));
                     return;
                 }
@@ -506,8 +397,10 @@ wsServer.on('connection', (ws) => {
                 ws.send(JSON.stringify({ type: 'server_lobby_joined', lobbyState: targetLobby }));
                 broadcastLobbyUpdate(targetLobby.lobbyId);
                 break;
+            
+            // --- MODIFIED: client_find_game ---
             case 'client_find_game':
-                if (lobby || room) {
+                if (lobby || host) {
                     ws.send(JSON.stringify({ type: 'error', message: 'Already in a lobby or game.' }));
                     return;
                 }
@@ -527,6 +420,13 @@ wsServer.on('connection', (ws) => {
                     console.log(`Client ${client.name} matched into lobby ${publicLobby.lobbyId}`);
                     ws.send(JSON.stringify({ type: 'server_lobby_joined', lobbyState: publicLobby }));
                     broadcastLobbyUpdate(publicLobby.lobbyId);
+
+                    // --- FIX: Auto-start public game if full ---
+                    if (!publicLobby.isPrivate && Object.keys(publicLobby.players).length === publicLobby.maxPlayers) {
+                        console.log(`Public lobby ${publicLobby.lobbyId} is full. Auto-starting game...`);
+                        startGame(publicLobby);
+                    }
+                    // --- END OF FIX ---
                 } else {
                     const newLobbyId = generateLobbyCode();
                     const newPublicLobby = {
@@ -535,12 +435,7 @@ wsServer.on('connection', (ws) => {
                         mode: data.mode,
                         isPrivate: false,
                         maxPlayers: modeRequirements[data.mode],
-                        players: {
-                            [clientId]: {
-                                name: client.name,
-                                team: 'blue'
-                            }
-                        }
+                        players: { [clientId]: { name: client.name, team: 'blue' } }
                     };
                     lobbies[newLobbyId] = newPublicLobby;
                     client.lobbyId = newLobbyId;
@@ -548,6 +443,8 @@ wsServer.on('connection', (ws) => {
                     ws.send(JSON.stringify({ type: 'server_lobby_created', lobbyState: newPublicLobby }));
                 }
                 break;
+            // --- END OF MODIFICATION ---
+            
             case 'client_change_team':
                 if (!lobby) return;
                 const newTeam = data.team;
@@ -560,6 +457,8 @@ wsServer.on('connection', (ws) => {
                     ws.send(JSON.stringify({ type: 'error', message: `Team ${newTeam} is full.` }));
                 }
                 break;
+
+            // --- MODIFIED: client_start_game ---
             case 'client_start_game':
                 if (!lobby) {
                     ws.send(JSON.stringify({ type: 'error', message: 'Not in a lobby.' }));
@@ -568,8 +467,11 @@ wsServer.on('connection', (ws) => {
                 if (lobby.hostId !== clientId) {
                     ws.send(JSON.stringify({ type: 'error', message: 'Only the host can start the game.' }));
                     return;
+
                 }
-                if (Object.keys(lobby.players).length !== lobby.maxPlayers) {
+                // We only check for player count in private lobbies
+                // because public lobbies auto-start
+                if (lobby.isPrivate && Object.keys(lobby.players).length !== lobby.maxPlayers) {
                     ws.send(JSON.stringify({ type: 'error', message: 'Waiting for more players.' }));
                     return;
                 }
@@ -577,34 +479,25 @@ wsServer.on('connection', (ws) => {
                      ws.send(JSON.stringify({ type: 'error', message: 'Teams must be balanced.' }));
                     return;
                 }
-                console.log(`Lobby ${lobby.lobbyId} is starting game...`);
-                const roomId = lobby.lobbyId;
-                const playerClientIds = Object.keys(lobby.players);
-                const playersForGame = playerClientIds.map(cid => clients[cid]);
-                const lobbyPlayers = lobby.players;
-                broadcastToLobby(roomId, { 
-                    type: 'server_game_starting',
-                    lobby: lobby
-                });
-                gameRooms[roomId] = new GameRoom(roomId, lobby.mode, playersForGame, lobbyPlayers);
-                for (const c of playersForGame) {
-                    c.lobbyId = null;
-                    c.roomId = roomId;
-                }
-                delete lobbies[roomId];
+                
+                // Call the new function
+                startGame(lobby);
                 break;
+            // --- END OF MODIFICATION ---
+
             case 'client_answer':
-                if (room) {
-                    room.handleAnswer(clientId, data.answer);
+                if (host) {
+                    host.handleAnswer(clientId, data.answer);
                 }
                 break;
             case 'client_ice_candidate':
-                if (room && data.candidate) {
-                    room.handleIceCandidate(clientId, data.candidate);
+                if (host && data.candidate) {
+                    host.handleIceCandidate(clientId, data.candidate);
                 }
                 break;
         }
     });
+
     ws.on('close', () => {
         console.log(`Client ${clientId} disconnected.`);
         const client = clients[clientId];
@@ -624,11 +517,11 @@ wsServer.on('connection', (ws) => {
                 broadcastLobbyUpdate(client.lobbyId);
             }
         }
-        if (client.roomId && gameRooms[client.roomId]) {
-            const room = gameRooms[client.roomId];
-            const playerInfo = room.players[clientId]?.info;
-            if (playerInfo) {
-                room.removePlayer(clientId, playerInfo.id);
+        if (client.roomId && gameHosts[client.roomId]) {
+            const host = gameHosts[client.roomId];
+            const playerId = host.players[clientId]?.info?.id;
+            if (playerId) {
+                host.removePlayer(clientId, playerId);
             }
         }
         delete clients[clientId];
