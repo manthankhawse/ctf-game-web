@@ -171,3 +171,95 @@ footer {
 .home-container .button-group {
     margin: 1rem 0;
 }
+
+/* ... Your existing CSS ... */
+
+/* --- Results Page --- */
+.results-container {
+  max-width: 900px;
+}
+
+.results-scores-final {
+  font-size: 4rem;
+  font-weight: bold;
+  margin: 0.5rem 0 2rem 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.team-blue-score { color: #3498db; }
+.team-red-score { color: #e74c3c; }
+.score-divider {
+  color: #ecf0f1;
+  margin: 0 2rem;
+  line-height: 1;
+}
+
+.results-scoreboard-container {
+  display: flex;
+  justify-content: space-around;
+  width: 100%;
+  margin-bottom: 2rem;
+  gap: 20px;
+}
+
+.results-team-list {
+  width: 48%;
+  background-color: #1a2530;
+  padding: 1rem;
+  border-radius: 8px;
+}
+
+.results-team-list h2 {
+  margin-top: 0;
+  padding-bottom: 0.5rem;
+  border-bottom: 2px solid #2c3e50;
+}
+.results-team-list.team-blue h2 { color: #3498db; }
+.results-team-list.team-red h2 { color: #e74c3c; }
+
+.player-stat-card {
+  background-color: #2c3e50;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 1rem;
+  margin: 0.5rem 0;
+  border-radius: 4px;
+  border-left: 4px solid #34495e;
+}
+
+.player-stat-card.mvp {
+  border-left-color: #f1c40f;
+  background: linear-gradient(90deg, #2c3e50 0%, #3a5064 100%);
+}
+
+.player-stat-name {
+  font-size: 1.1rem;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+}
+
+.mvp-badge {
+  background-color: #f1c40f;
+  color: #1a2530;
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  margin-left: 0.5rem;
+  line-height: 1;
+}
+
+.player-stat-scores {
+  display: flex;
+  gap: 1rem;
+  font-size: 0.9rem;
+  color: #bdc3c7;
+}
+
+.player-stat-scores strong {
+  color: #ecf0f1;
+  font-weight: 600;
+}

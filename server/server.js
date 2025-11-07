@@ -66,7 +66,6 @@ function broadcastLobbyUpdate(lobbyId) {
     });
 }
 
-// --- GameRoom Class ---
 class GameRoom {
     constructor(roomId, mode, playerClients, lobbyPlayers) {
         this.roomId = roomId;
@@ -82,7 +81,8 @@ class GameRoom {
                 blue: { x: 1, y: 9, carriedBy: null },
                 red: { x: 18, y: 9, carriedBy: null }
             },
-            scores: { blue: 0, red: 0 }
+            scores: { blue: 0, red: 0 },
+            playerStats: {} // <-- NEW: To store stats
         };
         
         console.log(`[Room ${roomId}]: Creating ${mode} game...`);
@@ -107,6 +107,7 @@ class GameRoom {
         });
     }
 
+    // ... (setupPlayer, handleAnswer, handleIceCandidate are unchanged) ...
     async setupPlayer(client, playerInfo) {
         const pc = new RTCPeerConnection({
             iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
@@ -124,14 +125,10 @@ class GameRoom {
             console.log(`[Room ${this.roomId}]: Data channel OPEN for ${playerInfo.id} (${playerInfo.name})`);
             this.addPlayerToState(playerInfo);
             
-            // --- FIX (Bug 2): Reverted to original, correct logic ---
-            // This checks if the number of players who have an "open" data channel
-            // now equals the total number of players expected in the game.
             if (Object.keys(this.players).length === Object.keys(this.gameState.players).length) {
                 console.log(`[Room ${this.roomId}]: All players connected. Starting game loop.`);
                 this.startGameLoop();
             }
-            // --- END OF FIX ---
         };
         
         dc.onmessage = (event) => {
@@ -169,7 +166,6 @@ class GameRoom {
     }
 
     async handleAnswer(clientId, answer) {
-        // (Unchanged)
         const pc = this.players[clientId]?.pc;
         if (pc) {
             await pc.setRemoteDescription(answer); 
@@ -178,12 +174,12 @@ class GameRoom {
     }
 
     async handleIceCandidate(clientId, candidate) {
-        // (Unchanged)
         const pc = this.players[clientId]?.pc;
         if (pc && candidate) {
             await pc.addIceCandidate(new RTCIceCandidate(candidate));
         }
     }
+
 
     // --- Game Logic ---
     addPlayerToState(playerInfo) {
@@ -194,21 +190,27 @@ class GameRoom {
         this.gameState.players[playerInfo.id] = {
             x: isBlue ? 1 : 18,
             y: yPos,
-            initialY: yPos, // <-- FIX (Bug 1): Store the initial Y position
+            initialY: yPos,
             team: playerInfo.team,
             name: playerInfo.name,
             hasFlag: null
         };
+
+        // --- NEW: Initialize stats ---
+        this.gameState.playerStats[playerInfo.id] = {
+            name: playerInfo.name,
+            team: playerInfo.team,
+            captures: 0,
+            tags: 0
+        };
+        // --- END OF NEW ---
     }
 
     startGameLoop() {
-        // --- FIX (Bug 2): Add safety check ---
         if (this.gameLoopInterval) {
             console.warn(`[Room ${this.roomId}]: startGameLoop called, but loop is already running.`);
             return;
         }
-        // --- END OF FIX ---
-
         console.log(`[Room ${this.roomId}]: Game loop started.`);
         this.gameLoopInterval = setInterval(() => {
             this.runGameTick();
@@ -216,7 +218,7 @@ class GameRoom {
     }
     
     runGameTick() {
-        // (Unchanged)
+        // 1. Update positions (Unchanged)
         for (const playerId in this.playerMovements) {
             const moves = this.playerMovements[playerId];
             const player = this.gameState.players[playerId];
@@ -242,6 +244,8 @@ class GameRoom {
                 player.y = targetY;
             }
         }
+
+        // 2. Check logic (Unchanged, but `checkGameLogic` is modified below)
         let globalWinner = null;
         for (const playerId in this.gameState.players) {
             if (globalWinner) break;
@@ -249,6 +253,8 @@ class GameRoom {
             this.gameState = newState;
             if (gameOverWinner) globalWinner = gameOverWinner;
         }
+
+        // 3. Broadcast state (Unchanged)
         const stateMessage = JSON.stringify({ type: 'gameState', state: this.gameState });
         for (const clientId in this.players) {
             const { dc } = this.players[clientId];
@@ -256,14 +262,37 @@ class GameRoom {
                 dc.send(stateMessage);
             }
         }
+
+        // 4. Handle FINAL game over (MODIFIED)
         if (globalWinner) {
             console.log(`[Room ${this.roomId}]: FINAL Game Over! Winner: ${globalWinner}`);
+            
             clearInterval(this.gameLoopInterval);
+
+            // --- NEW: Calculate MVP ---
+            let mvpPlayerId = null;
+            let maxMvpScore = -1;
+
+            for (const [playerId, stats] of Object.entries(this.gameState.playerStats)) {
+                // Score: 100 points per capture, 25 per tag
+                const mvpScore = (stats.captures * 100) + (stats.tags * 25);
+                if (mvpScore > maxMvpScore) {
+                    maxMvpScore = mvpScore;
+                    mvpPlayerId = playerId;
+                }
+            }
+            // --- END OF NEW ---
+
+            // --- MODIFIED: Add stats and mvp to payload ---
           const finalResultsMessage = JSON.stringify({ 
                 type: 'game_over_final', 
                 winner: globalWinner,
-                scores: this.gameState.scores 
+                scores: this.gameState.scores,
+                playerStats: this.gameState.playerStats, // <-- ADDED
+                mvp: mvpPlayerId                      // <-- ADDED
             });
+            // --- END OF MODIFICATION ---
+
             for (const clientId in this.players) {
                 const { dc } = this.players[clientId];
                  if (dc.readyState === 'open') {
@@ -274,7 +303,7 @@ class GameRoom {
     }
 
     checkGameLogic(playerId, currentState) {
-        // (Unchanged)
+// Note: We are modifying newState, which is a deep copy. This is correct.
         let newState = JSON.parse(JSON.stringify(currentState));
         let gameOverWinner = null;
         const player = newState.players[playerId];
@@ -283,28 +312,49 @@ class GameRoom {
         const opponentTeam = playerTeam === 'blue' ? 'red' : 'blue';
         const opponentFlag = newState.flags[opponentTeam];
         const homeBaseCenter = playerTeam === 'blue' ? { x: 1, y: 9 } : { x: 18, y: 9 };
+        
+        // Flag pickup (unchanged)
         if (player.x === opponentFlag.x && player.y === opponentFlag.y && !player.hasFlag) {
             player.hasFlag = opponentTeam;
             opponentFlag.carriedBy = playerId;
         }
+
         const inHomeBase = (playerTeam === 'blue' && player.x <= 2) || (playerTeam === 'red' && player.x >= 17);
         if (player.hasFlag && inHomeBase) {
             newState.scores[playerTeam]++;
+            
+            // --- NEW: Increment Captures ---
+            if (newState.playerStats[playerId]) {
+                newState.playerStats[playerId].captures++;
+            }
+            // --- END OF NEW ---
+            
             if (newState.scores[playerTeam] >= WIN_SCORE) {
                 gameOverWinner = playerTeam; 
             } else {
                 newState = this.resetRound(newState); 
             }
         }
+
+        // Flag return (MODIFIED)
         for (const oppId in newState.players) {
             const opponent = newState.players[oppId];
+            // If an opponent (oppId) has our flag (playerTeam)
             if (opponent.team === opponentTeam && opponent.hasFlag === playerTeam) {
+                // And we (playerId) are on them
                 if (player.x === opponent.x && player.y === opponent.y) {
                     const returnedFlag = newState.flags[playerTeam];
-                    returnedFlag.x = homeBaseCenter.x; 
+                   returnedFlag.x = homeBaseCenter.x; 
                     returnedFlag.y = homeBaseCenter.y;
                     returnedFlag.carriedBy = null;
                     opponent.hasFlag = null;
+
+                    // --- NEW: Increment Tags ---
+                    // 'player' is the one who made the tag
+                    if (newState.playerStats[playerId]) {
+                        newState.playerStats[playerId].tags++;
+                    }
+                    // --- END OF NEW ---
                 }
             }
         }
@@ -316,7 +366,7 @@ class GameRoom {
             const player = state.players[playerId];
             const isBlue = player.team === 'blue';
             player.x = isBlue ? 1 : 18;
-            player.y = player.initialY; // <-- FIX (Bug 1): Use the stored initial Y
+            player.y = player.initialY; // Use the stored initial Y
             player.hasFlag = null;
         }
         state.flags.blue = { x: 1, y: 9, carriedBy: null };
@@ -325,12 +375,13 @@ class GameRoom {
     }
 
     removePlayer(clientId, playerId) {
-        // (Unchanged)
         console.log(`[Room ${this.roomId}]: Removing player ${playerId}`);
         delete this.players[clientId];
         delete this.gameState.players[playerId];
         delete this.playerMovements[playerId];
         delete this.playerIdToInfo[playerId];
+        // Note: We DON'T delete from playerStats, so they stay on the scoreboard
+        
         if (Object.keys(this.players).length === 0) {
             console.log(`[Room ${this.roomId}]: Room is empty, cleaning up.`);
             clearInterval(this.gameLoopInterval);
@@ -339,8 +390,8 @@ class GameRoom {
     }
 }
 
-// --- WebSocket Signaling & Lobby Logic ---
-// (This entire section is unchanged)
+// ... (WebSocket, ws.on('connection'), and all lobby logic is unchanged) ...
+// (The rest of the file is identical to the previous step)
 wsServer.on('connection', (ws) => {
     const clientId = uuidv4();
     clients[clientId] = { 
@@ -529,7 +580,6 @@ wsServer.on('connection', (ws) => {
     });
 
     ws.on('close', () => {
-        // (Unchanged)
         console.log(`Client ${clientId} disconnected.`);
         const client = clients[clientId];
         if (!client) return; 

@@ -106,7 +106,7 @@ function Game() {
     return () => {
       console.log("Cleaning up game page.");
       removeSocketListener('all');
-      clearInterval(inputLoopRef.current); // This is the CORRECT place
+      clearInterval(inputLoopRef.current);
       if (peerConnectionRef.current) {
           peerConnectionRef.current.close();
       }
@@ -121,7 +121,7 @@ function Game() {
         console.log('Data channel OPEN');
         setGameStatus('Game in progress!');
         
-        clearInterval(inputLoopRef.current); // Clear any old just in case
+        clearInterval(inputLoopRef.current);
         inputLoopRef.current = setInterval(() => {
             if (channel.readyState === 'open') {
                 channel.send(JSON.stringify({
@@ -129,13 +129,13 @@ function Game() {
                     inputState: localMovementsRef.current
                 }));
             }
-        }, 1000 / 60); // 60 FPS
+        }, 1000 / 60); 
     };
 
     channel.onclose = () => {
         console.log('Data channel CLOSED');
         setGameStatus('Lost connection to game server.');
-        clearInterval(inputLoopRef.current); // Clear on close
+        clearInterval(inputLoopRef.current); 
     };
 
     channel.onmessage = (event) => {
@@ -146,21 +146,26 @@ function Game() {
         } else if (message.type === 'game_over_final') {
             console.log("Final game over received!", message);
             
-            clearInterval(inputLoopRef.current); // Clear on game over
+            clearInterval(inputLoopRef.current); 
             
             isNavigatingAwayRef.current = true;
             
+            // --- THIS IS THE CHANGE FROM PHASE 3 ---
+            // Pass the entire message state to the results page
             navigate('/results', { 
                 state: { 
                     winner: message.winner, 
-                    scores: message.scores 
+                    scores: message.scores,
+                    playerStats: message.playerStats, // <-- NEW
+                    mvp: message.mvp                   // <-- NEW
                 } 
             });
+            // --- END OF CHANGE ---
         }
     };
   };
 
-  // --- useEffect 2: Keyboard Input Handling (CHANGED) ---
+  // --- useEffect 2: Keyboard Input Handling ---
   useEffect(() => {
     const getDirectionFromKey = (key) => {
       switch (key) {
@@ -201,11 +206,10 @@ function Game() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
       window.removeEventListener('blur', handleBlur); 
-      // --- FIX (Bug 3): Removed clearInterval from here ---
     };
   }, []); // Empty deps, runs once
 
-  // --- Render Logic (UNCHANGED) ---
+  // --- Render Logic ---
   const scores = gameState ? gameState.scores : { blue: 0, red: 0 };
   const teamColor = myTeam === 'blue' ? '#3498db' : '#e74c3c';
 
