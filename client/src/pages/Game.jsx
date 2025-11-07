@@ -25,7 +25,7 @@ function Game() {
   const peerConnectionRef = useRef(null); 
   const dataChannelRef = useRef(null); 
   const iceQueueRef = useRef([]);
-
+  const isNavigatingAwayRef = useRef(false);
   // --- Refs for NEW Input Model ---
   const inputLoopRef = useRef(null); // Stores the setInterval ID for our input loop
   const localMovementsRef = useRef({ up: false, down: false, left: false, right: false });
@@ -47,9 +47,15 @@ function Game() {
     };
 
     ws.onclose = () => {
-        setGameStatus('Disconnected from server.');
-        alert('Disconnected from server. Returning home.');
-        navigate('/');
+        if (isNavigatingAwayRef.current) {
+      console.log('WebSocket closed intentionally for navigation.');
+      return; // Do nothing
+    }
+
+    // If we get here, it was an UNEXPECTED disconnect
+    setGameStatus('Disconnected from server.');
+    alert('Disconnected from server. Returning home.');
+    navigate('/');
     };
 
     // --- Primary WebSocket Message Handler ---
@@ -137,32 +143,45 @@ function Game() {
     channel.onopen = () => {
         console.log('Data channel OPEN');
         setGameStatus('Game in progress!');
-        
-        // --- START THE INPUT LOOP ---
-        // Send our input state to the server 60 times a second
-        inputLoopRef.current = setInterval(() => {
-            if (channel.readyState === 'open') {
-                channel.send(JSON.stringify({
-                    type: 'client_input',
-                    inputState: localMovementsRef.current
-                }));
-            }
-        }, 1000 / 60); // 60Hz, same as server tick
+        
+        // Start the input loop
+        inputLoopRef.current = setInterval(() => {
+            if (channel.readyState === 'open') {
+                channel.send(JSON.stringify({
+                    type: 'client_input',
+                   inputState: localMovementsRef.current
+                }));
+            }
+        }, 1000 / 60); 
     };
 
     channel.onclose = () => {
         console.log('Data channel CLOSED');
         setGameStatus('Lost connection to game server.');
-        clearInterval(inputLoopRef.current); // Stop the input loop
+        clearInterval(inputLoopRef.current); 
     };
 
-    // Server's state is our only source of truth.
+    // --- THIS IS THE CHANGE ---
     channel.onmessage = (event) => {
         const message = JSON.parse(event.data);
+
         if (message.type === 'gameState') {
             setGameState(message.state); 
-        } else if (message.type === 'gameOver') {
-            alert(`${message.winner.toUpperCase()} WINS! A new game will begin.`);
+        } else if (message.type === 'game_over_final') {
+            console.log("Final game over received!", message);
+            
+            // Stop the input loop
+            clearInterval(inputLoopRef.current); 
+
+            isNavigatingAwayRef.current = true;
+            
+            // Navigate to results page with state
+            navigate('/results', { 
+                state: { 
+                    winner: message.winner, 
+                    scores: message.scores 
+                } 
+            });
         }
     };
   };

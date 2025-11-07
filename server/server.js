@@ -160,8 +160,9 @@ class GameRoom {
         }, TICK_RATE);
     }
     
+    // ... inside GameRoom class
     runGameTick() {
-        // 1. Update positions based on the latest input state
+        // 1. Update positions (No Change)
         for (const playerId in this.playerMovements) {
             const moves = this.playerMovements[playerId];
             const player = this.gameState.players[playerId];
@@ -183,44 +184,63 @@ class GameRoom {
                     collision = true;
                     break;
                 }
-            }
-             if (!collision) {
+           }
+            if (!collision) {
                 player.x = targetX;
                 player.y = targetY;
             }
         }
 
-        // 2. Check logic
+        // 2. Check logic (No Change)
         let globalWinner = null;
         for (const playerId in this.gameState.players) {
+            if (globalWinner) break; // Stop checking if winner is found
             const { newState, gameOverWinner } = this.checkGameLogic(playerId, this.gameState);
             this.gameState = newState;
             if (gameOverWinner) globalWinner = gameOverWinner;
         }
 
-        // 3. Broadcast state
+        // 3. Broadcast state (No Change)
         const stateMessage = JSON.stringify({ type: 'gameState', state: this.gameState });
         for (const clientId in this.players) {
             const { dc } = this.players[clientId];
             if (dc.readyState === 'open') {
                 dc.send(stateMessage);
-            }
+}
         }
 
-        // 4. Handle game over
+        // 4. Handle FINAL game over (SIMPLIFIED LOGIC)
         if (globalWinner) {
-           console.log(`[Room ${this.roomId}]: Game over! Winner: ${globalWinner}`);
-            const gameOverMessage = JSON.stringify({ type: 'gameOver', winner: globalWinner });
+            console.log(`[Room ${this.roomId}]: FINAL Game Over! Winner: ${globalWinner}`);
+            
+            // 1. Stop the game loop
+            clearInterval(this.gameLoopInterval);
+
+            // 2. Create the final results message
+         const finalResultsMessage = JSON.stringify({ 
+                type: 'game_over_final', 
+                winner: globalWinner,
+                scores: this.gameState.scores 
+            });
+
+            // 3. Broadcast the final results to all players
             for (const clientId in this.players) {
                 const { dc } = this.players[clientId];
-                if (dc.readyState === 'open') dc.send(gameOverMessage);
+                 if (dc.readyState === 'open') {
+                    dc.send(finalResultsMessage);
+                }
             }
-            // Reset game
-            this.gameState.scores = { blue: 0, red: 0 };
-            this.resetRound();
+            
+            // 4. That's it! 
+            // We let the clients disconnect naturally.
+            // The ws.on('close') handler will call removePlayer,
+            // and removePlayer will delete the room when the
+            // last player leaves. No crash, no race condition.
         }
     }
 
+
+    
     checkGameLogic(playerId, currentState) {
         let newState = JSON.parse(JSON.stringify(currentState));
         let gameOverWinner = null;
@@ -228,28 +248,39 @@ class GameRoom {
         if (!player) return { newState, gameOverWinner };
         const playerTeam = player.team;
         const opponentTeam = playerTeam === 'blue' ? 'red' : 'blue';
-       const opponentFlag = newState.flags[opponentTeam];
+        const opponentFlag = newState.flags[opponentTeam];
         const homeBaseCenter = playerTeam === 'blue' ? { x: 1, y: 9 } : { x: 18, y: 9 };
+        
+        // Flag pickup (no change)
         if (player.x === opponentFlag.x && player.y === opponentFlag.y && !player.hasFlag) {
             player.hasFlag = opponentTeam;
             opponentFlag.carriedBy = playerId;
-     }
+        }
+
+        // --- THIS IS THE CORRECTED LOGIC ---
         const inHomeBase = (playerTeam === 'blue' && player.x <= 2) || (playerTeam === 'red' && player.x >= 17);
         if (player.hasFlag && inHomeBase) {
-            newState.scores[playerTeam]++;
+            newState.scores[playerTeam]++; // Increment score
+            
+            // NOW check for win
             if (newState.scores[playerTeam] >= WIN_SCORE) {
                 gameOverWinner = playerTeam; 
+                // Don't reset the round, let the game end!
             } else {
+                // This was a non-winning point, SO reset the round
                 newState = this.resetRound(newState); 
             }
         }
+        // --- END OF CORRECTION ---
+
+        // Flag return (no change)
         for (const oppId in newState.players) {
             const opponent = newState.players[oppId];
             if (opponent.team === opponentTeam && opponent.hasFlag === playerTeam) {
-               if (player.x === opponent.x && player.y === opponent.y) {
+                if (player.x === opponent.x && player.y === opponent.y) {
                     const returnedFlag = newState.flags[playerTeam];
                     returnedFlag.x = homeBaseCenter.x; 
-                   returnedFlag.y = homeBaseCenter.y;
+                    returnedFlag.y = homeBaseCenter.y;
                     returnedFlag.carriedBy = null;
                     opponent.hasFlag = null;
                 }
@@ -279,11 +310,11 @@ class GameRoom {
         delete this.gameState.players[playerId];
         delete this.playerMovements[playerId];
 
-       // Check if room is empty
+        // Check if room is empty
         if (Object.keys(this.players).length === 0) {
-            console.log(`[Room ${this.roomId}]: Room is empty, closing.`);
+            console.log(`[Room ${this.roomId}]: Room is empty, cleaning up.`);
             clearInterval(this.gameLoopInterval);
-           delete gameRooms[this.roomId];
+            delete gameRooms[this.roomId];
         }
     }
 }
