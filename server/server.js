@@ -10,15 +10,18 @@ const Redis = require('ioredis');
 
 // --- Server Configuration ---
 const PORT = process.env.PORT || 3000;
-const SERVER_ID = `ws://localhost:${PORT}`;
+const HOST = process.env.PUBLIC_HOST || 'localhost';
+const SERVER_ID = `ws://${HOST}:${PORT}`;
 const LOBBY_CHANNEL = 'lobby-channel';
 const HEARTBEAT_CHANNEL = 'server-heartbeats';
 const HEARTBEAT_INTERVAL_MS = 5000; // 5 seconds
 const SERVER_TTL_MS = 15000; // 15 seconds
 
 // --- Redis Connection ---
-const publisher = new Redis();
-const subscriber = new Redis();
+const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
+
+const publisher = new Redis({ host: REDIS_HOST, port: 6379 });
+const subscriber = new Redis({ host: REDIS_HOST, port: 6379 });
 
 // --- Game Constants ---
 const modeRequirements = { '1v1': 2, '2v2': 4, '3v3': 6 };
@@ -206,9 +209,9 @@ class GameHost {
         dc.onopen = () => {
             console.log(`[Host ${this.roomId}]: Data channel OPEN for ${playerInfo.id}`);
             this.openDataChannels++;
-            if (!this.gameStarted && this.openDataChannels === this.totalPlayers) {
+            if (!this.gameStarted && this.openDataChannels >= 1) { 
                 this.gameStarted = true;
-                console.log(`[Host ${this.roomId}]: All ${this.totalPlayers} data channels are open. Starting game.`);
+                console.log(`[Host ${this.roomId}]: Starting game (Debug Mode).`);
                 this.worker.postMessage({ type: 'start_game' });
             }
         };

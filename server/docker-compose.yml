@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  # The Redis Brain
+  redis:
+    image: redis:alpine
+    container_name: ctf-redis
+    # On Linux/Cloud, 'host' mode lets Redis bind directly to localhost
+    network_mode: host 
+
+  # Server 1 (Port 3000)
+  server-1:
+    build: .
+    container_name: ctf-server-3000
+    environment:
+      - PORT=3000
+      - REDIS_HOST=127.0.0.1
+      # Change 'localhost' to your LAN IP (e.g., 192.168.1.5) if testing on mobile locally
+      - PUBLIC_HOST=localhost 
+    network_mode: host # <--- CRITICAL for WebRTC
+    depends_on:
+      - redis
+
+  # Server 2 (Port 3001)
+  server-2:
+    build: .
+    container_name: ctf-server-3001
+    environment:
+      - PORT=3001
+      - REDIS_HOST=127.0.0.1
+      - PUBLIC_HOST=localhost
+    network_mode: host
+    depends_on:
+      - redis
+
+  # Server 3 (Port 3002)
+  server-3:
+    build: .
+    container_name: ctf-server-3002
+    environment:
+      - PORT=3002
+      - REDIS_HOST=127.0.0.1
+      - PUBLIC_HOST=localhost
+    network_mode: host
+    depends_on:
+      - redis
