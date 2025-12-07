@@ -276,13 +276,20 @@ function Game() {
   // ---
 
   return (
-    <div className="game-container">
-      <div className="score-board">
-        <h2>SCORES</h2>
-        <p>Blue: <span id="blue-score">{scores.blue}</span></p>
-        <p>Red: <span id="red-score">{scores.red}</span></p>
+    <div className="game-screen">
+      <div className="hud-panel scores-panel">
+        <h2 className="hud-title">SCOREBOARD</h2>
+        <div className="score-row blue">
+          <span>BLUE</span>
+          <span className="score-value">{scores.blue}</span>
+        </div>
+        <div className="score-row red">
+          <span>RED</span>
+          <span className="score-value">{scores.red}</span>
+        </div>
       </div>
       
+      {/* The Canvas Component */}
       <GameCanvas 
         gameState={gameState} 
         mapLayout={mapLayout} 
@@ -290,12 +297,15 @@ function Game() {
         myId={myId} 
       />
       
-      <div className="status">
-        <h2>STATUS</h2>
-        <p id="player-id" style={{ color: teamColor }}>
-          {myId ? `You are: ${myId.toUpperCase()}` : 'Connecting...'}
+      <div className="hud-panel status-panel">
+        <h2 className="hud-title">SCOREBOARD</h2>
+        <p className="status-row">
+          OPERATIVE: <span style={{ color: teamColor, fontWeight: 'bold' }}>{myId ? myId.toUpperCase() : '...'}</span>
         </p>
-        <p id="game-status">{gameStatus}</p>
+        <p className="status-row">
+          LINK: <span className="status-value">{gameStatus}</span>
+        </p>
+        <button className="abort-btn" onClick={() => navigate('/')}>EXIT</button>
       </div>
 
       <div className="remote-audio-container">

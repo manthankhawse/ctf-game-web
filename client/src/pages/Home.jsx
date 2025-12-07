@@ -1,4 +1,3 @@
-// src/pages/Home.jsx
 import React, { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useSocket } from '../context/SocketContext';
@@ -9,33 +8,21 @@ function Home() {
     const [lobbyCode, setLobbyCode] = useState('');
     const navigate = useNavigate();
 
-    // Listen for lobby creation/join events
     useEffect(() => {
         if (!socket) return;
-
-        // The context now handles navigation, but we can listen
-        // to lobby updates to know when to navigate *away* from home.
         const handleLobbyUpdate = (message) => {
-            console.log('Home page saw lobby update, navigating...');
             navigate(`/lobby/${message.lobbyState.lobbyId}`);
         };
-
         addSocketListener('server_lobby_created', handleLobbyUpdate);
         addSocketListener('server_lobby_joined', handleLobbyUpdate);
-
         return () => {
             removeSocketListener('server_lobby_created');
             removeSocketListener('server_lobby_joined');
         };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [socket, addSocketListener, removeSocketListener, navigate]);
 
-    // If we refresh the page and are still in a lobby, go there
     useEffect(() => {
-        if (lobbyState) {
-            navigate(`/lobby/${lobbyState.lobbyId}`);
-        }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+        if (lobbyState) navigate(`/lobby/${lobbyState.lobbyId}`);
     }, [lobbyState, navigate]);
 
     const handleFindGame = (mode) => {
@@ -56,46 +43,54 @@ function Home() {
 
     return (
         <div className="home-container">
-            <h1>Capture the Flag</h1>
-            <p>A fast-paced WebRTC game.</p>
+            <header>
+                <h1>CYBER FLAG</h1>
+                <p className="subtitle">TACTICAL MULTIPLAYER ARENA</p>
+            </header>
 
             <div className="name-input-container">
                 <input
                     type="text"
-                    placeholder="Enter Your Name"
+                    placeholder="ENTER CODENAME"
                     value={playerName}
                     onChange={(e) => updatePlayerName(e.target.value)}
                     maxLength="15"
                 />
             </div>
 
-            <h2>Find a Public Game</h2>
-            <div className="button-group">
-                <button onClick={() => handleFindGame('1v1')}>Find 1v1 Game</button>
-                <button onClick={() => handleFindGame('2v2')}>Find 2v2 Game</button>
-                <button onClick={() => handleFindGame('3v3')}>Find 3v3 Game</button>
+            <div className="menu-section">
+                <h2>PUBLIC MATCH</h2>
+                <div className="button-group">
+                    <button onClick={() => handleFindGame('1v1')}>1 VS 1</button>
+                    <button onClick={() => handleFindGame('2v2')}>2 VS 2</button>
+                    <button onClick={() => handleFindGame('3v3')}>3 VS 3</button>
+                </div>
             </div>
 
-            <h2>Private Game</h2>
-            <div className="button-group">
-                <button onClick={() => handleCreateLobby('1v1')}>Create 1v1</button>
-                <button onClick={() => handleCreateLobby('2v2')}>Create 2v2</button>
-                <button onClick={() => handleCreateLobby('3v3')}>Create 3v3</button>
-            </div>
-            
-            <div className="join-lobby-container">
-                <input
-                    type="text"
-                    placeholder="Enter Lobby Code"
-                    value={lobbyCode}
-                    onChange={(e) => setLobbyCode(e.target.value)}
-                    maxLength="6"
-                />
-                <button onClick={handleJoinLobby}>Join</button>
+            <div className="menu-section private-section">
+                <h2>PRIVATE LOBBY</h2>
+                <div className="button-group">
+                    <button onClick={() => handleCreateLobby('1v1')}>CREATE 1v1</button>
+                    <button onClick={() => handleCreateLobby('2v2')}>CREATE 2v2</button>
+                    <button onClick={() => handleCreateLobby('3v3')}>CREATE 3v3</button>
+                </div>
+                
+                <div style={{ marginTop: '1.5rem', borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '1.5rem' }}>
+                    <div className="join-lobby-container">
+                        <input
+                            type="text"
+                            placeholder="CODE"
+                            value={lobbyCode}
+                            onChange={(e) => setLobbyCode(e.target.value)}
+                            maxLength="6"
+                        />
+                        <button className="join-btn" onClick={handleJoinLobby}>JOIN</button>
+                    </div>
+                </div>
             </div>
 
-            <Link to="/instructions">
-                <button className="how-to-play-btn">How to Play</button>
+            <Link to="/instructions" className="how-to-play-link">
+                How to Play
             </Link>
         </div>
     );

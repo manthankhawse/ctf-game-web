@@ -19,11 +19,13 @@ const getSocketUrl = () => {
     const serverPort = params.get('server'); // e.g., "3001"
     if (serverPort) {
         console.log(`Connecting to server from URL param: ${serverPort}`);
+        // return `ws://10.205.223.130:${serverPort}`;
         return `ws://localhost:${serverPort}`;
     }
 
     // 3. Default to port 3000
-    return 'ws://localhost:3000';
+    // return 'ws://10.205.223.130:3000';
+    return `ws://localhost:3000`;
 }
 
 export const SocketProvider = ({ children }) => {

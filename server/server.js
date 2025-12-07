@@ -6,11 +6,28 @@ const { v4: uuidv4 } = require('uuid');
 const { RTCPeerConnection, RTCSessionDescription, RTCIceCandidate } = require('werift');
 const { Worker } = require('worker_threads');
 const path = require('path');
+const os = require('os');
 const Redis = require('ioredis');
 
 // --- Server Configuration ---
 const PORT = process.env.PORT || 3000;
+// --- NEW: Dynamic IP Detection ---
+function getLocalIp() {
+    const interfaces = os.networkInterfaces();
+    for (const name of Object.keys(interfaces)) {
+        for (const iface of interfaces[name]) {
+            // Skip internal (localhost) and non-IPv4 addresses
+            if (iface.family === 'IPv4' && !iface.internal) {
+                return iface.address;
+            }
+        }
+    }
+    return 'localhost'; // Fallback
+}
+
+// const LOCAL_IP = '10.205.223.130';
 const SERVER_ID = `ws://localhost:${PORT}`;
+
 const LOBBY_CHANNEL = 'lobby-channel';
 const HEARTBEAT_CHANNEL = 'server-heartbeats';
 const HEARTBEAT_INTERVAL_MS = 5000; // 5 seconds
